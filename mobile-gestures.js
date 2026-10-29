@@ -79,6 +79,37 @@
     }
     return null;
   }
+  function isStartingCellSelected(s) {
+    // The game renders its selection as a non-interactive SVG path. Use that
+    // path rather than guessing the game's internal Angular state.
+    var path = s.room && s.room.querySelector('path.cell-selection');
+    if (!path || !path.isPointInFill || !path.getScreenCTM) return false;
+    try {
+      var matrix = path.getScreenCTM();
+      if (!matrix) return false;
+      var rect = s.cell.getBoundingClientRect();
+      var svg = s.cell.ownerSVGElement;
+      var point = svg.createSVGPoint();
+      point.x = (rect.left + rect.right) / 2;
+      point.y = (rect.top + rect.bottom) / 2;
+      return path.isPointInFill(point.matrixTransform(matrix.inverse()));
+    } catch (e) { return false; }
+  }
+  function startMansionSelection(s) {
+    if (isStartingCellSelected(s)) {
+      // The original single click toggles off the only selected cell. Select
+      // another cell temporarily to clear that state before selecting start.
+      var cells = s.room.querySelectorAll('rect.cell');
+      for (var i = 0; i < cells.length; i++) {
+        if (cells[i] !== s.cell) {
+          var r = cells[i].getBoundingClientRect();
+          sendMouse(cells[i], 'click', (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+          break;
+        }
+      }
+    }
+    selectMansionCell(s.cell, s, s.startX, s.startY);
+  }
   function selectMansionCell(cell, s, x, y) {
     if (!cell || s.seen.has(cell)) return;
     s.seen.add(cell);
@@ -180,7 +211,7 @@
     var dx = e.clientX - s.startX, dy = e.clientY - s.startY;
     if (!s.dragging && squared(dx, dy) >= DRAG_PX * DRAG_PX) {
       s.dragging = true;
-      if (s.kind === 'mansion') selectMansionCell(s.cell, s, s.startX, s.startY);
+      if (s.kind === 'mansion') startMansionSelection(s);
       else sendMouse(s.cell, 'mousedown', s.startX, s.startY);
     }
     if (s.dragging) {
