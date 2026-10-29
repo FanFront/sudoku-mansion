@@ -12,6 +12,11 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+
 import androidx.webkit.ServiceWorkerClientCompat;
 import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
@@ -79,6 +84,15 @@ public final class MainActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClientCompat() {
             @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (url != null && url.startsWith(START_URL)) {
+                    // Only the Android APK gets the alternate touch controls.
+                    injectAndroidTouchBridge(view);
+                }
+            }
+
+            @Override
             public WebResourceResponse shouldInterceptRequest(
                     WebView view, WebResourceRequest request) {
                 return assetLoader.shouldInterceptRequest(request.getUrl());
@@ -110,6 +124,20 @@ public final class MainActivity extends Activity {
             webView.loadUrl(START_URL);
         } else {
             webView.restoreState(savedInstanceState);
+        }
+    }
+
+    private void injectAndroidTouchBridge(WebView view) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                getAssets().open("android-touch.js"), StandardCharsets.UTF_8))) {
+            StringBuilder script = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                script.append(line).append('\n');
+            }
+            view.evaluateJavascript(script.toString(), null);
+        } catch (IOException e) {
+            android.util.Log.e("SudokuMansion", "Unable to enable Android touch gestures", e);
         }
     }
 
