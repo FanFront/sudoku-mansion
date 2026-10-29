@@ -1,265 +1,252 @@
-// Mobile touch bridge for the pre-built Sudoku Mansion web app.
-// Single finger: drag-select cells; two fingers: pan the mansion map.
-// Preserve the game's original click / dblclick and grid selection handlers.
+// Mobile pointer gesture coordinator for Sudoku Mansion's pre-built web client.
+// One tap -> select; one-finger drag -> multi-select; two fingers -> pan mansion;
+// double tap -> original dblclick action. No desktop-mouse changes.
 (function () {
   'use strict';
   if (!document.documentElement.classList.contains('dsh-mobile')) return;
 
-  var DRAG_PX = 7;
-  var SAMPLE_PX = 12;
+  var DRAG_DISTANCE = 7;
+  var MAX_TAP_MOVE = 9;
+  var DOUBLE_TAP_MS = 430;
+  var DOUBLE_TAP_DISTANCE = 28;
+  var SAMPLE_DISTANCE = 8;
   var pointers = new Map();
-  var board = null;
-  var stroke = null;
-  var pan = null;
-  var hadMultipleFingers = false;
-  var blockCompatibilityUntil = 0;
-  var lastTouchX = 0;
-  var lastTouchY = 0;
+  var gesture = null;
+  var multiTouch = false;
+  var lastTap = null;
+  var lastTouch = null;
+  var replayingPan = false;
 
-  function touch(e) { return e.pointerType === 'touch' || e.pointerType === 'pen'; }
-  function isRealMouse(e) { return e.isTrusted && Date.now() < blockCompatibilityUntil; }
-  function squared(x, y) { return x * x + y * y; }
-  function hostOf(target) {
+  function isTouch(e) { return e.pointerType === 'touch' || e.pointerType === 'pen'; }
+  function d2(a, b) {
+    var x = a.x - b.x, y = a.y - b.y;
+    return x * x + y * y;
+  }
+  function hostFor(target) {
     if (!target || !target.closest) return null;
-    var mansion = target.closest('app-mansion .canvas-wrap');
-    if (mansion) return { kind: 'mansion', element: mansion };
+    var canvas = target.closest('app-mansion .canvas-wrap');
+    if (canvas) return { kind: 'mansion', element: canvas };
     var grid = target.closest('app-sudoku-grid');
     return grid ? { kind: 'grid', element: grid } : null;
   }
-  function cellOf(target, kind) {
-    if (!target || !target.closest) return null;
-    return target.closest(kind === 'mansion'
-      ? 'app-mansion .mansion-svg g.room rect.cell'
-      : 'app-sudoku-grid rect[aria-label^="Row "]');
+  function selector(kind) {
+    return kind === 'mansion' ? 'g.room rect.cell' : 'rect[aria-label^="Row "]';
   }
-  function sameBoard(a, b) { return a && b && a.element === b.element && a.kind === b.kind; }
-  function markCompat(e) {
-    blockCompatibilityUntil = Date.now() + 750;
-    lastTouchX = e.clientX;
-    lastTouchY = e.clientY;
-  }
-  function suppressCompatibilityMouse(e) {
-    // Do not block actual mouse use on touchscreen laptops or our synthetic events.
-    if (!isRealMouse(e)) return;
-    if (squared(e.clientX - lastTouchX, e.clientY - lastTouchY) > 60 * 60) return;
-    var host = hostOf(e.target);
-    if (!host) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-  }
-  // Capture BEFORE the bundled game's document-level synthetic mouse listeners.
-  // Only block delayed real compatibility mouse events after an actual drag/pan.
-  ['mousedown', 'mouseup', 'click'].forEach(function (name) {
-    window.addEventListener(name, suppressCompatibilityMouse, true);
-  });
-
-  function sendMouse(target, type, x, y, shift) {
-    if (!target || !target.isConnected) return;
-    target.dispatchEvent(new MouseEvent(type, {
-      bubbles: true, cancelable: true, view: window,
-      clientX: x, clientY: y, button: 0, buttons: type === 'mouseup' ? 0 : 1,
-      shiftKey: !!shift, detail: type === 'click' ? 1 : 0
-    }));
-  }
-  function cellAt(x, y, s) {
-    if (!s || !s.cell || !s.cell.isConnected) return null;
-    // Limit selection to the room where the gesture began. A single selection
-    // in the game is always associated with one room, even on the mansion map.
-    var hovered = document.elementFromPoint(x, y);
-    var hit = cellOf(hovered, s.kind);
-    if (hit && (s.kind === 'grid' || hit.closest('g.room') === s.room)) return hit;
-    // Visual overlays may cover SVG rects even though they are not selectable.
-    // Fall back to geometrical hit testing in the starting room only.
-    var scope = s.kind === 'mansion' ? s.room : s.host;
-    var selector = s.kind === 'mansion' ? 'rect.cell' : 'rect[aria-label^="Row "]';
-    var cells = scope ? scope.querySelectorAll(selector) : [];
+  function cellAt(host, x, y, room) {
+    var scope = room || (host.kind === 'mansion'
+      ? host.element.querySelector('.mansion-svg') : host.element);
+    if (!scope) return null;
+    var top = document.elementFromPoint(x, y);
+    var cell = top && top.closest ? top.closest(selector(host.kind)) : null;
+    if (cell && scope.contains(cell)) return cell;
+    var cells = scope.querySelectorAll(selector(host.kind));
     for (var i = 0; i < cells.length; i++) {
-      var r = cells[i].getBoundingClientRect();
-      if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return cells[i];
+      var rect = cells[i].getBoundingClientRect();
+      if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return cells[i];
     }
     return null;
   }
-  function isStartingCellSelected(s) {
-    // The game renders its selection as a non-interactive SVG path. Use that
-    // path rather than guessing the game's internal Angular state.
-    var path = s.host && s.host.querySelector('path.cell-selection');
+  function cellKey(cell, kind) {
+    if (kind === 'grid') return cell.getAttribute('aria-label') || '';
+    var room = cell.closest('g.room');
+    return (room ? room.getAttribute('aria-label') : '') + '/' +
+      cell.getAttribute('x') + ',' + cell.getAttribute('y');
+  }
+  function emitMouse(target, type, x, y, shift) {
+    if (!target || !target.isConnected) return;
+    target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, cancelable: true, view: window, detail: type === 'click' ? 1 : 0,
+      clientX: x, clientY: y, button: 0,
+      buttons: type === 'mouseup' ? 0 : 1, shiftKey: !!shift
+    }));
+  }
+  function blockNativeMouse(e) {
+    if (!e.isTrusted || !lastTouch || Date.now() - lastTouch.at > 850) return;
+    var host = hostFor(e.target);
+    if (!host || (host.kind === 'mansion' && !e.target.closest('.mansion-svg'))) return;
+    // Don't interfere with a physical mouse used immediately after touch.
+    if (d2({ x: e.clientX, y: e.clientY }, lastTouch) > 65 * 65) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+  ['mousedown', 'mouseup', 'click', 'dblclick'].forEach(function (type) {
+    window.addEventListener(type, blockNativeMouse, true);
+  });
+  function noteTouch(e) {
+    lastTouch = { at: Date.now(), x: e.clientX, y: e.clientY };
+  }
+  function selectedAtStart(g) {
+    var path = g.host.element.querySelector('path.cell-selection');
     if (!path || !path.isPointInFill || !path.getScreenCTM) return false;
     try {
       var matrix = path.getScreenCTM();
       if (!matrix) return false;
-      var rect = s.cell.getBoundingClientRect();
-      var svg = s.cell.ownerSVGElement;
-      var point = svg.createSVGPoint();
+      var point = g.startCell.ownerSVGElement.createSVGPoint();
+      var rect = g.startCell.getBoundingClientRect();
       point.x = (rect.left + rect.right) / 2;
       point.y = (rect.top + rect.bottom) / 2;
       return path.isPointInFill(point.matrixTransform(matrix.inverse()));
-    } catch (e) { return false; }
+    } catch (_) { return false; }
   }
-  function startMansionSelection(s) {
-    if (isStartingCellSelected(s)) {
-      // The original single click toggles off the only selected cell. Select
-      // another cell temporarily to clear that state before selecting start.
-      var cells = s.room.querySelectorAll('rect.cell');
-      for (var i = 0; i < cells.length; i++) {
-        if (cells[i] !== s.cell) {
-          var r = cells[i].getBoundingClientRect();
-          sendMouse(cells[i], 'click', (r.left + r.right) / 2, (r.top + r.bottom) / 2);
-          break;
-        }
+  function selectMansionCell(g, cell, x, y) {
+    if (!cell || g.seen.has(cell)) return;
+    g.seen.add(cell);
+    // The bundled game's click handler supports Shift-click to extend a selection.
+    emitMouse(cell, 'click', x, y, g.seen.size > 1);
+  }
+  function beginDrag(g) {
+    g.dragging = true;
+    lastTap = null;
+    if (g.host.kind === 'mansion') {
+      if (selectedAtStart(g)) g.seen.add(g.startCell);
+      else selectMansionCell(g, g.startCell, g.start.x, g.start.y);
+    } else {
+      emitMouse(g.startCell, 'mousedown', g.start.x, g.start.y);
+    }
+  }
+  function strokeSegment(g, to) {
+    var dx = to.x - g.previous.x, dy = to.y - g.previous.y;
+    var count = Math.min(256, Math.max(1,
+      Math.ceil(Math.sqrt(dx * dx + dy * dy) / SAMPLE_DISTANCE)));
+    for (var i = 1; i <= count; i++) {
+      var x = g.previous.x + dx * i / count;
+      var y = g.previous.y + dy * i / count;
+      if (g.host.kind === 'mansion') {
+        selectMansionCell(g, cellAt(g.host, x, y, g.room), x, y);
+      } else {
+        emitMouse(g.host.element, 'mousemove', x, y);
       }
     }
-    selectMansionCell(s.cell, s, s.startX, s.startY);
+    g.previous = to;
   }
-  function selectMansionCell(cell, s, x, y) {
-    if (!cell || s.seen.has(cell)) return;
-    s.seen.add(cell);
-    // The existing handler uses Shift+click to toggle an additional cell.
-    sendMouse(cell, 'click', x, y, s.seen.size > 1);
-  }
-  function sampleLine(s, fromX, fromY, x, y, callback) {
-    var dx = x - fromX, dy = y - fromY;
-    var steps = Math.min(120, Math.max(1, Math.ceil(Math.sqrt(squared(dx, dy)) / SAMPLE_PX)));
-    for (var j = 1; j <= steps; j++) {
-      var px = fromX + dx * j / steps;
-      var py = fromY + dy * j / steps;
-      callback(px, py);
+  function endGridDrag(g) {
+    if (g && g.dragging && g.host.kind === 'grid') {
+      emitMouse(g.host.element, 'mouseup', g.previous.x, g.previous.y);
     }
   }
-  function finishGridDrag(s) {
-    if (s && s.dragging && s.kind === 'grid') sendMouse(s.host, 'mouseup', s.x, s.y);
-  }
-  function resetAfterLastPointer() {
-    if (pointers.size) return;
-    board = null;
-    stroke = null;
-    pan = null;
-    hadMultipleFingers = false;
-  }
-  function centroid() {
+  function center() {
     var x = 0, y = 0;
     pointers.forEach(function (p) { x += p.x; y += p.y; });
     return { x: x / pointers.size, y: y / pointers.size };
   }
-  function stopPan() {
-    if (pan && pan.active) {
-      // The original mansion component has no pointercancel handler.
-      pan.board.dispatchEvent(new PointerEvent('pointerup', {
-        bubbles: true, pointerId: pan.id, pointerType: 'touch'
-      }));
-    }
-    pan = null;
+  function finish() {
+    if (pointers.size) return;
+    gesture = null;
+    multiTouch = false;
   }
-
   document.addEventListener('pointerdown', function (e) {
-    if (!touch(e)) return;
-    var hit = hostOf(e.target);
-    if (!hit || (board && !sameBoard(board, hit))) return;
-    if (!board) board = hit;
+    if (!isTouch(e)) return;
+    var host = hostFor(e.target);
+    if (!host) return;
+    if (gesture && (host.kind !== gesture.host.kind ||
+        host.element !== gesture.host.element)) return;
+    noteTouch(e);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 1) {
-      var cell = cellOf(e.target, hit.kind);
-      stroke = cell ? {
-        kind: hit.kind, id: e.pointerId, host: hit.element, cell: cell,
-        room: hit.kind === 'mansion' ? cell.closest('g.room') : null,
-        startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY,
-        dragging: false, seen: new Set()
-      } : null;
-      if (hit.kind === 'mansion') {
-        // Otherwise the bundled game pans the map on EVERY single-finger move.
-        e.stopPropagation();
-      }
+      var cell = cellAt(host, e.clientX, e.clientY);
+      var room = cell && host.kind === 'mansion' ? cell.closest('g.room') : null;
+      gesture = {
+        host: host, fingerId: e.pointerId, startCell: cell, room: room,
+        start: { x: e.clientX, y: e.clientY },
+        previous: { x: e.clientX, y: e.clientY },
+        dragging: false, seen: new Set(), panAnchor: null
+      };
+      // Let the original mansion pointerdown reset didDrag and its pan state.
+      // Intercept subsequent one-finger moves instead.
     } else {
-      hadMultipleFingers = true;
-      if (stroke) finishGridDrag(stroke);
-      stroke = null;
-      if (pointers.size === 2 && hit.kind === 'mansion') {
-        // Let only the second real pointerdown reach the existing pan handler.
-        // It initializes panX/panY and calls setPointerCapture on a valid ID.
-        var center = centroid();
-        pan = { active: true, board: hit.element, id: e.pointerId,
-          originX: e.clientX, originY: e.clientY,
-          centerX: center.x, centerY: center.y };
-      } else {
-        // No pan exists on the in-room Sudoku SVG; avoid accidental draws.
-        if (pan) stopPan();
-        if (hit.kind === 'mansion') e.stopPropagation();
+      multiTouch = true;
+      lastTap = null;
+      if (gesture) {
+        endGridDrag(gesture);
+        gesture.startCell = null;
+        if (pointers.size === 2 && host.kind === 'mansion') {
+          gesture.panAnchor = { center: center(), finger: { x: e.clientX, y: e.clientY } };
+        }
       }
     }
   }, true);
 
   document.addEventListener('pointermove', function (e) {
-    if (!e.isTrusted || !touch(e) || !pointers.has(e.pointerId)) return;
+    if (!isTouch(e) || replayingPan || !pointers.has(e.pointerId)) return;
     var p = pointers.get(e.pointerId);
     p.x = e.clientX; p.y = e.clientY;
-
-    if (board && board.kind === 'mansion') e.stopPropagation();
-    if (pan) {
-      if (pointers.size === 2) {
-        // Feed centroid motion into the game's real pointer-pan implementation;
-        // pan/zoom/save/recentering all continue to work as before.
-        var center = centroid();
-        pan.board.dispatchEvent(new PointerEvent('pointermove', {
-          bubbles: true, pointerType: 'touch', pointerId: pan.id,
-          clientX: pan.originX + center.x - pan.centerX,
-          clientY: pan.originY + center.y - pan.centerY
-        }));
+    noteTouch(e);
+    if (!gesture) return;
+    if (gesture.host.kind === 'mansion') {
+      // The built-in handler otherwise pans on the very first finger's move.
+      e.stopPropagation();
+    }
+    if (multiTouch) {
+      if (pointers.size === 2 && gesture.panAnchor &&
+          gesture.host.kind === 'mansion' && typeof PointerEvent !== 'undefined') {
+        var c = center(), anchor = gesture.panAnchor;
+        replayingPan = true;
+        try {
+          gesture.host.element.dispatchEvent(new PointerEvent('pointermove', {
+            bubbles: true, pointerId: e.pointerId, pointerType: 'touch',
+            clientX: anchor.finger.x + c.x - anchor.center.x,
+            clientY: anchor.finger.y + c.y - anchor.center.y
+          }));
+        } finally { replayingPan = false; }
       }
       return;
     }
-    var s = stroke;
-    if (!s || s.id !== e.pointerId || hadMultipleFingers) return;
-    var dx = e.clientX - s.startX, dy = e.clientY - s.startY;
-    if (!s.dragging && squared(dx, dy) >= DRAG_PX * DRAG_PX) {
-      s.dragging = true;
-      if (s.kind === 'mansion') startMansionSelection(s);
-      else sendMouse(s.cell, 'mousedown', s.startX, s.startY);
+    if (e.pointerId !== gesture.fingerId || !gesture.startCell) return;
+    var point = { x: e.clientX, y: e.clientY };
+    if (!gesture.dragging && d2(point, gesture.start) >= DRAG_DISTANCE * DRAG_DISTANCE) {
+      beginDrag(gesture);
     }
-    if (s.dragging) {
-      sampleLine(s, s.x, s.y, e.clientX, e.clientY, function (x, y) {
-        if (s.kind === 'mansion') selectMansionCell(cellAt(x, y, s), s, x, y);
-        else sendMouse(s.host, 'mousemove', x, y);
-      });
-    }
-    s.x = e.clientX; s.y = e.clientY;
+    if (gesture.dragging) strokeSegment(gesture, point);
+    else gesture.previous = point;
   }, true);
 
   function release(e, canceled) {
-    if (!touch(e) || !pointers.has(e.pointerId)) return;
-    pointers.delete(e.pointerId);
-    var s = stroke;
-    if (s && s.id === e.pointerId) {
-      if (s.dragging) {
-        if (!canceled) {
-          sampleLine(s, s.x, s.y, e.clientX, e.clientY, function (x, y) {
-            if (s.kind === 'mansion') selectMansionCell(cellAt(x, y, s), s, x, y);
-            else sendMouse(s.host, 'mousemove', x, y);
-          });
+    if (!isTouch(e) || !pointers.has(e.pointerId)) return;
+    noteTouch(e);
+    var g = gesture;
+    // Finish panning as soon as either finger lifts; do not turn the surviving
+    // single finger into a drawing gesture.
+    if (multiTouch) lastTap = null;
+    if (g && e.pointerId === g.fingerId && !multiTouch && g.startCell) {
+      var end = { x: e.clientX, y: e.clientY };
+      if (g.dragging) {
+        if (!canceled) strokeSegment(g, end);
+        endGridDrag(g);
+      } else if (!canceled && d2(end, g.start) <= MAX_TAP_MOVE * MAX_TAP_MOVE) {
+        var now = Date.now(), key = cellKey(g.startCell, g.host.kind);
+        var doubleTap = lastTap && lastTap.kind === g.host.kind &&
+          lastTap.key === key && now - lastTap.at <= DOUBLE_TAP_MS &&
+          d2(lastTap, end) <= DOUBLE_TAP_DISTANCE * DOUBLE_TAP_DISTANCE;
+        if (doubleTap) {
+          lastTap = null;
+          emitMouse(g.startCell, 'dblclick', end.x, end.y);
+        } else {
+          lastTap = { at: now, kind: g.host.kind, key: key, x: end.x, y: end.y };
+          if (g.host.kind === 'mansion') emitMouse(g.startCell, 'click', end.x, end.y);
+          else {
+            emitMouse(g.startCell, 'mousedown', end.x, end.y);
+            emitMouse(g.host.element, 'mouseup', end.x, end.y);
+          }
         }
-        s.x = e.clientX; s.y = e.clientY;
-        finishGridDrag(s);
-        markCompat(e);
-      }
-      stroke = null;
+      } else lastTap = null;
     }
-    if (hadMultipleFingers) markCompat(e);
-    if (pan && pan.id === e.pointerId) {
-      // Allow the original pointerup to end panning, unless this was cancel.
-      if (canceled) stopPan();
-      else pan = null;
-    } else if (board && board.kind === 'mansion') {
-      // First pointer was never sent to the game; do not terminate an active
-      // second-finger pan when first finger is lifted.
-      e.stopPropagation();
+    pointers.delete(e.pointerId);
+    if (g && g.host.kind === 'mansion' && multiTouch && pointers.size === 1) {
+      // Original onPointerUp ends native pan. Do not move on surviving finger.
+      g.panAnchor = null;
     }
-    resetAfterLastPointer();
+    if (canceled && g && g.host.kind === 'mansion' && pointers.size === 0 &&
+        typeof PointerEvent !== 'undefined') {
+      g.host.element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    }
+    finish();
   }
   document.addEventListener('pointerup', function (e) { release(e, false); }, true);
   document.addEventListener('pointercancel', function (e) { release(e, true); }, true);
-
   window.addEventListener('blur', function () {
-    finishGridDrag(stroke);
-    stopPan();
+    endGridDrag(gesture);
     pointers.clear();
-    resetAfterLastPointer();
+    finish();
+    lastTap = null;
   });
 })();
