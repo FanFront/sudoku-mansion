@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.fanfront.sudokumansion'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.fanfront.sudokumansion'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // The existing repository IS the web build. Bundle it into the APK
+    // automatically, so no duplicate checked-in website or Node toolchain
+    // is required. This also works with "gradle :app:assembleDebug" locally.
+    sourceSets {
+        main {
+            assets.srcDir(layout.buildDirectory.dir('generated/web-assets'))
+        }
+    }
+}
+
+def syncWebAssets = tasks.register('syncWebAssets', Sync) {
+    from(rootProject.projectDir) {
+        include 'index.html', '404.html', '*.js', '*.css', '*.html'
+        include '*.webmanifest', '*.png', '*.ico', '*.svg'
+        include 'assets/**', 'media/**'
+    }
+    into(layout.buildDirectory.dir('generated/web-assets/www'))
+}
+
+// AGP must wait for the static files to be staged before merging assets.
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+    dependsOn(syncWebAssets)
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}
