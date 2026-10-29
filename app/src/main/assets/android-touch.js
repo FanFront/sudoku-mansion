@@ -160,8 +160,9 @@
         dragging: false,
         cancelled: false
       };
-      // Do NOT pass finger 1 to the original canvas, which pans on touch.
-      e.stopImmediatePropagation();
+      // Let the original handler reset its 'didDrag' flag. A bubbling
+      // listener below immediately stops that initial single-finger pan.
+      // Without the reset, clicks after a previous two-finger pan are ignored.
     } else if (overviewFingers.size === 2) {
       if (overviewGesture) overviewGesture.cancelled = true;
       var center = midpoint(Array.from(overviewFingers.values()));
@@ -181,6 +182,19 @@
       e.stopImmediatePropagation();
     }
   }, { capture: true, passive: false });
+
+  document.addEventListener('pointerdown', function (e) {
+    if (!isTouch(e) || !overviewGesture ||
+        overviewFingers.size !== 1 ||
+        !overviewFingers.has(e.pointerId)) return;
+    // The original canvas handler has now run: reset didDrag, but immediately
+    // terminate the single-finger pan before any movement reaches it.
+    overviewGesture.canvas.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true,
+      pointerId: e.pointerId,
+      pointerType: 'touch'
+    }));
+  }, false);
 
   document.addEventListener('pointermove', function (e) {
     if (!isTouch(e)) return;
