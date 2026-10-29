@@ -197,7 +197,8 @@
     }
     if (e.pointerId !== gesture.fingerId || !gesture.startCell) return;
     var point = { x: e.clientX, y: e.clientY };
-    if (!gesture.dragging && d2(point, gesture.start) >= DRAG_DISTANCE * DRAG_DISTANCE) {
+    var dragThreshold = gesture.host.kind === 'grid' ? 14 : DRAG_DISTANCE;
+    if (!gesture.dragging && d2(point, gesture.start) >= dragThreshold * dragThreshold) {
       beginDrag(gesture);
     }
     if (gesture.dragging) strokeSegment(gesture, point);
@@ -216,7 +217,8 @@
       if (g.dragging) {
         if (!canceled) strokeSegment(g, end);
         endGridDrag(g);
-      } else if (!canceled && d2(end, g.start) <= MAX_TAP_MOVE * MAX_TAP_MOVE) {
+      } else if (!canceled && d2(end, g.start) <=
+          (g.host.kind === 'grid' ? 16 * 16 : MAX_TAP_MOVE * MAX_TAP_MOVE)) {
         endGridDrag(g);
         var now = Date.now(), key = cellKey(g.startCell, g.host.kind);
         var doubleTap = lastTap && lastTap.kind === g.host.kind &&
