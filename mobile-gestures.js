@@ -82,7 +82,7 @@
   function isStartingCellSelected(s) {
     // The game renders its selection as a non-interactive SVG path. Use that
     // path rather than guessing the game's internal Angular state.
-    var path = s.room && s.room.querySelector('path.cell-selection');
+    var path = s.host && s.host.querySelector('path.cell-selection');
     if (!path || !path.isPointInFill || !path.getScreenCTM) return false;
     try {
       var matrix = path.getScreenCTM();
