@@ -39,6 +39,26 @@ The `syncWebAssets` Gradle task automatically copies the website files
 build's generated assets before APK packaging. Edit the existing web files
 normally; no second copy is checked in.
 
+## Android touch controls
+
+The APK has an Android-only gesture bridge; the GitHub Pages web version is unchanged.
+
+- **Mansion map:** tap a cell to select it; drag **one finger** across cells
+  to multi-select them; then tap a number on the keypad to apply it to the
+  selection. This reuses the game's Shift-click additive multi-selection.
+- **Mansion map:** drag with **two fingers** to pan the map (their midpoint
+  controls movement). Dragging with only one finger no longer pans the map.
+- **Puzzle room:** one-finger drag uses the original grid's built-in mouse
+  drag-selection handler; number entry applies to the selected cells.
+- **Line mode:** the original pointer-based line tool remains available.
+- Mouse and keyboard use the original game controls.
+- A quick double-tap on a mansion cell still opens its room.
+
+These gestures are implemented in `app/src/main/assets/android-touch.js`,
+injected by the Android WebView after the bundled page loads. The original
+compiled game remains unmodified. Test on a physical Android device before
+sharing the APK broadly.
+
 ## Notes
 
 - Package ID: `com.fanfront.sudokumansion`; Android 7.0+ (API 24+).
