@@ -55,7 +55,7 @@
   function emitMouse(target, type, x, y, shift) {
     if (!target || !target.isConnected) return;
     target.dispatchEvent(new MouseEvent(type, {
-      bubbles: true, cancelable: true, view: window, detail: type === 'click' ? 1 : 0,
+      bubbles: true, cancelable: true, view: window, detail: type === 'dblclick' ? 2 : (type === 'click' ? 1 : 0),
       clientX: x, clientY: y, button: 0,
       buttons: type === 'mouseup' ? 0 : 1, shiftKey: !!shift
     }));
@@ -100,8 +100,6 @@
     if (g.host.kind === 'mansion') {
       if (selectedAtStart(g)) g.seen.add(g.startCell);
       else selectMansionCell(g, g.startCell, g.start.x, g.start.y);
-    } else {
-      emitMouse(g.startCell, 'mousedown', g.start.x, g.start.y);
     }
   }
   function strokeSegment(g, to) {
@@ -120,7 +118,8 @@
     g.previous = to;
   }
   function endGridDrag(g) {
-    if (g && g.dragging && g.host.kind === 'grid') {
+    if (g && g.gridDown && g.host.kind === 'grid') {
+      g.gridDown = false;
       emitMouse(g.host.element, 'mouseup', g.previous.x, g.previous.y);
     }
   }
@@ -149,8 +148,13 @@
         host: host, fingerId: e.pointerId, startCell: cell, room: room,
         start: { x: e.clientX, y: e.clientY },
         previous: { x: e.clientX, y: e.clientY },
-        dragging: false, seen: new Set(), panAnchor: null
+        dragging: false, seen: new Set(), panAnchor: null, gridDown: false
       };
+      if (host.kind === 'grid' && cell) {
+        // Mirror desktop order: selection belongs to mouse DOWN, not touch release.
+        gesture.gridDown = true;
+        emitMouse(cell, 'mousedown', e.clientX, e.clientY);
+      }
       // Let the original mansion pointerdown reset didDrag and its pan state.
       // Intercept subsequent one-finger moves instead.
     } else {
@@ -193,7 +197,8 @@
     }
     if (e.pointerId !== gesture.fingerId || !gesture.startCell) return;
     var point = { x: e.clientX, y: e.clientY };
-    if (!gesture.dragging && d2(point, gesture.start) >= DRAG_DISTANCE * DRAG_DISTANCE) {
+    var dragThreshold = gesture.host.kind === 'grid' ? 14 : DRAG_DISTANCE;
+    if (!gesture.dragging && d2(point, gesture.start) >= dragThreshold * dragThreshold) {
       beginDrag(gesture);
     }
     if (gesture.dragging) strokeSegment(gesture, point);
@@ -212,7 +217,9 @@
       if (g.dragging) {
         if (!canceled) strokeSegment(g, end);
         endGridDrag(g);
-      } else if (!canceled && d2(end, g.start) <= MAX_TAP_MOVE * MAX_TAP_MOVE) {
+      } else if (!canceled && d2(end, g.start) <=
+          (g.host.kind === 'grid' ? 16 * 16 : MAX_TAP_MOVE * MAX_TAP_MOVE)) {
+        endGridDrag(g);
         var now = Date.now(), key = cellKey(g.startCell, g.host.kind);
         var doubleTap = lastTap && lastTap.kind === g.host.kind &&
           lastTap.key === key && now - lastTap.at <= DOUBLE_TAP_MS &&
@@ -223,12 +230,11 @@
         } else {
           lastTap = { at: now, kind: g.host.kind, key: key, x: end.x, y: end.y };
           if (g.host.kind === 'mansion') emitMouse(g.startCell, 'click', end.x, end.y);
-          else {
-            emitMouse(g.startCell, 'mousedown', end.x, end.y);
-            emitMouse(g.host.element, 'mouseup', end.x, end.y);
-          }
         }
-      } else lastTap = null;
+      } else {
+        lastTap = null;
+        endGridDrag(g);
+      }
     }
     pointers.delete(e.pointerId);
     if (g && g.host.kind === 'mansion' && multiTouch && pointers.size === 1) {
